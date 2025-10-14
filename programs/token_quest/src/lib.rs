@@ -114,6 +114,24 @@ pub mod token_quest {
         Ok(())
     }
 
+    pub fn withdraw_fees_sol(ctx: Context<WithdrawFeeSOL>) -> Result<()> {
+        let fee_pda = &ctx.accounts.fee_pda;
+        let admin = &ctx.accounts.admin;
+
+        // Get the fee PDA balance
+        let fee_balance = fee_pda.lamports();
+
+        require!(fee_balance > 0, CustomError::NoFeesToWithdraw);
+
+        // Transfer all fees from fee_pda to admin
+        **fee_pda.to_account_info().try_borrow_mut_lamports()? -= fee_balance;
+        **admin.to_account_info().try_borrow_mut_lamports()? += fee_balance;
+
+        msg!("✅ Admin withdrew {} lamports in fees", fee_balance);
+
+        Ok(())
+    }
+
     pub fn deposit_spl(ctx: Context<DepositSPL>, amount: u64) -> Result<()> {
         // Step 1️⃣ — Basic validation
         require!(amount > 0, CustomError::InvalidAmount);
@@ -216,6 +234,37 @@ pub mod token_quest {
 
         Ok(())
     }
+
+    pub fn withdraw_fees_spl(ctx: Context<WithdrawFeeSPL>) -> Result<()> {
+        let fee_pda = &ctx.accounts.fee_pda;
+        let fee_balance = fee_pda.amount;
+
+        require!(fee_balance > 0, CustomError::NoFeesToWithdraw);
+
+        // Prepare PDA signer seeds
+        let mint_key = ctx.accounts.mint.key();
+        let seeds = &[b"fee", mint_key.as_ref(), &[ctx.bumps.fee_pda]];
+        let signer_seeds = &[&seeds[..]];
+
+        // Transfer all fees from fee_pda to admin's token account
+        let transfer_fees = token::Transfer {
+            from: fee_pda.to_account_info(),
+            to: ctx.accounts.admin_token_account.to_account_info(),
+            authority: fee_pda.to_account_info(),
+        };
+
+        let cpi_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            transfer_fees,
+            signer_seeds,
+        );
+
+        token::transfer(cpi_ctx, fee_balance)?;
+
+        msg!("✅ Admin withdrew {} tokens in fees", fee_balance);
+
+        Ok(())
+    }
 }
 
 #[error_code]
@@ -230,6 +279,8 @@ pub enum CustomError {
     LockNotEnded,
     #[msg("Vault does not have enough SOL.")]
     InsufficientVaultBalance,
+    #[msg("No fees available to withdraw.")]
+    NoFeesToWithdraw,
 }
 
 #[derive(Accounts)]
@@ -331,6 +382,27 @@ pub struct WithdrawSOL<'info> {
 }
 
 #[derive(Accounts)]
+pub struct WithdrawFeeSOL<'info> {
+    #[account(
+        mut,
+        constraint = state.admin == admin.key() @ CustomError::UnauthorizedUser
+    )]
+    pub admin: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"fee", b"sol"],
+        bump,
+    )]
+    /// CHECK: PDA used to hold fee lamports
+    pub fee_pda: UncheckedAccount<'info>,
+
+    pub state: Account<'info, TokenQuestState>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 pub struct DepositSPL<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
@@ -414,4 +486,34 @@ pub struct WithdrawSPL<'info> {
     pub token_program: Program<'info, Token>,
 
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct WithdrawFeeSPL<'info> {
+    #[account(
+        mut,
+        constraint = state.admin == admin.key() @ CustomError::UnauthorizedUser
+    )]
+    pub admin: Signer<'info>,
+
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        seeds = [b"fee", mint.key().as_ref()],
+        bump,
+        constraint = fee_pda.mint == mint.key(),
+    )]
+    pub fee_pda: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = admin_token_account.owner == admin.key(),
+        constraint = admin_token_account.mint == mint.key(),
+    )]
+    pub admin_token_account: Account<'info, TokenAccount>,
+
+    pub state: Account<'info, TokenQuestState>,
+
+    pub token_program: Program<'info, Token>,
 }
